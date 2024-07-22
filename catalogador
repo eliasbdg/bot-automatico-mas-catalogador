@@ -1,0 +1,163 @@
+from iqoptionapi.stable_api import IQ_Option
+import time
+from configobj import ConfigObj
+from datetime import datetime
+
+def catag(API):
+    try:
+        config = ConfigObj('config.txt')
+        pares_abertos = []
+        
+        # Obtener todos los activos y sus horarios de apertura
+        all_asset = API.get_all_open_time()
+        
+        # Filtrar activos digitales abiertos
+        for par in all_asset['digital']:
+            if all_asset['digital'][par]['open']:
+                pares_abertos.append(par)
+        
+        # Filtrar activos turbo abiertos
+        for par in all_asset['turbo']:
+            if all_asset['turbo'][par]['open']:
+                if par not in pares_abertos:
+                    pares_abertos.append(par)
+        
+        timeframe = 60  # 1 minuto
+        qnt_velas = 120  # 120 velas
+        resultado = []
+        
+        # Iterar sobre los pares de activos abiertos
+        for par in pares_abertos:
+            velas = API.get_candles(par, timeframe, qnt_velas, time.time())
+            
+            if velas is None:
+                print(f"No se encontraron velas para el par {par}")
+                continue
+            
+            # Variables para contar resultados
+            win = 0
+            gale1 = 0
+            gale2 = 0
+            loss = 0
+            
+            # Analizar patrones de velas
+            for i in range(len(velas)):
+                minutos = float(datetime.fromtimestamp(velas[i]['from']).strftime('%M')[1:])
+                
+                if minutos == 5 or minutos == 0:
+                    try:
+                        # Determinar el tipo de vela (verde, roja, doji)
+                        vela1 = 'Verde' if velas[i-3]['open'] < velas[i-3]['close'] else 'Vermelha' if velas[i-3]['open'] > velas[i-3]['close'] else 'Doji'
+                        vela2 = 'Verde' if velas[i-2]['open'] < velas[i-2]['close'] else 'Vermelha' if velas[i-2]['open'] > velas[i-2]['close'] else 'Doji'
+                        vela3 = 'Verde' if velas[i-1]['open'] < velas[i-1]['close'] else 'Vermelha' if velas[i-1]['open'] > velas[i-1]['close'] else 'Doji'
+                        
+                        entrada1 = 'Verde' if velas[i]['open'] < velas[i]['close'] else 'Vermelha' if velas[i]['open'] > velas[i]['close'] else 'Doji'
+                        entrada2 = 'Verde' if velas[i+1]['open'] < velas[i+1]['close'] else 'Vermelha' if velas[i+1]['open'] > velas[i+1]['close'] else 'Doji'
+                        entrada3 = 'Verde' if velas[i+2]['open'] < velas[i+2]['close'] else 'Vermelha' if velas[i+2]['open'] > velas[i+2]['close'] else 'Doji'
+                        
+                        cores = [vela1, vela2, vela3]
+                        
+                        if cores.count('Verde') > cores.count('Vermelha') and cores.count('Doji') == 0:
+                            dir = 'Vermelha'
+                        elif cores.count('Vermelha') > cores.count('Verde') and cores.count('Doji') == 0:
+                            dir = 'Verde'
+                        else:
+                            continue
+                        
+                        # Comparar entradas con la dirección
+                        if entrada1 == dir:
+                            win += 1
+                        elif entrada2 == dir:
+                            gale1 += 1
+                        elif entrada3 == dir:
+                            gale2 += 1
+                        else:
+                            loss += 1
+                            
+                    except IndexError:
+                        # En caso de que no haya suficientes velas disponibles
+                        continue
+                    except Exception as e:
+                        print(f"Error en el análisis de velas: {e}")
+            
+            # Calcular porcentajes de resultados
+            total_entrada = win + gale1 + gale2 + loss
+            qnt_win = win
+            qnt_gale1 = win + gale1
+            qnt_gale2 = win + gale1 + gale2
+            
+            if total_entrada > 0:
+                win_pct = round(qnt_win / total_entrada * 100, 2)
+                gale1_pct = round(qnt_gale1 / total_entrada * 100, 2)
+                gale2_pct = round(qnt_gale2 / total_entrada * 100, 2)
+            else:
+                win_pct, gale1_pct, gale2_pct = 0, 0, 0
+            
+            resultado.append([par, win_pct, gale1_pct, gale2_pct])
+        
+        # Ordenar resultados según la configuración de martingala
+        if config['MARTINGALE'].get('usar_martingale', 'N') == 'S':
+            niveles_martingale = int(config['MARTINGALE'].get('niveles_martingale', '0'))
+            linha = min(niveles_martingale, 3)
+        else:
+            linha = 1
+        
+        lista_catalog = sorted(resultado, key=lambda x: x[linha], reverse=True)
+        
+        return lista_catalog, linha
+    
+    except Exception as e:
+        print(f"Error general en la función catag: {e}")
+        return [], 1  # Retorna una lista vacía y un valor predeterminado para línea en caso de error
+
+# Ejemplo de uso
+if __name__ == "__main__":
+    try:
+        API = IQ_Option("email", "password")
+        API.connect()
+        
+        if API.check_connect():
+            print("Conectado com sucesso")
+            
+            # Selección de cuenta (demo o real)
+            cuenta = input("Selecione a conta em que deseja conectar: demo ou real - ").strip().lower()
+            if cuenta == 'demo':
+                API.change_balance("PRACTICE")  # Cambiar a cuenta demo
+                print("Conta demo selecionada")
+            elif cuenta == 'real':
+                API.change_balance("REAL")  # Cambiar a cuenta real
+                print("Conta real selecionada")
+            else:
+                print("Selección inválida de cuenta.")
+                sys.exit(1)
+            
+            # Información de la cuenta
+            balance = API.get_balance()
+            print(f"Seu Saldo na conta {cuenta} é de ${balance}")
+            
+            # Configuraciones de entrada, stop win y stop loss
+            valor_entrada = 5.0
+            stop_win = 100.0
+            stop_loss = -100.0
+            
+            print(f"\n>> Iniciando catalogação")
+            
+            # Llamar a la función de catalogación
+            lista_catalog, linha = catag(API)
+            
+            # Imprimir resultados
+            headers = ["Ativo", "Win (%)", "Gale 1 (%)", "Gale 2 (%)"]
+            print(tabulate(lista_catalog, headers=headers, floatfmt=".2f"))
+            
+        else:
+            print("Conexão falhou")
+    
+    except KeyboardInterrupt:
+        print("\n\nOperação interrompida pelo usuário.")
+    
+    except Exception as e:
+        print(f"Erro geral no script: {e}")
+
+    finally:
+        if API:
+            API.close_connection()
